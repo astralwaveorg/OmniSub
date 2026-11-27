@@ -83,9 +83,8 @@ def converter(image):
             time.sleep(0.25)
         else:
             raise AssertionError("converter health check never became ready")
-        for file, contents in (("omnisub-fixture.ini", CONF), ("omnisub-fixture.yaml", YAML)):
-            docker("exec", "-i", name, "sh", "-c", f"cat > /base/base/{file}",
-                   input=contents.encode())
+        docker("exec", "-i", name, "sh", "-c", "cat > /base/base/omnisub-fixture.ini",
+               input=CONF.encode())
         yield name
     finally:
         docker("stop", name)
@@ -129,7 +128,7 @@ def candidate(name):
     malformed = REALITY.replace("sid=0123456789abcdef", "sid=zz").replace("fixture-reality", "invalid")
     modern = request(name, "surge", f"{HY2}|{malformed}", list="true", ver="6")
     assert b"fixture-hy2" in modern and b"invalid =" not in modern
-    stash = request(name, "stash", "base/omnisub-fixture.yaml")
+    stash = request(name, "stash", "data:text/plain;base64," + base64.b64encode(YAML.encode()).decode())
     assert b"support-x25519mlkem768: true" in stash and b"auth: fixture-pass" in stash
     assert b"password: fixture-pass" not in stash
     for token in (b"x-padding-bytes: 100-1000", b"session-placement: header",
