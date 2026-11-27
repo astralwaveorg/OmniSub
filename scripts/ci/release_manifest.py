@@ -72,21 +72,14 @@ def create_manifest(
     version: str,
     revision: str,
     build_date: str,
-    dockerhub_digest: str,
     ghcr_digest: str,
 ) -> dict:
     if not VERSION_RE.fullmatch(version):
         raise ValueError("version must be an exact vX.Y.Z tag")
     if not SHA_RE.fullmatch(revision):
         raise ValueError("revision must be a full 40-character Git SHA")
-    for name, digest in (
-        ("Docker Hub", dockerhub_digest),
-        ("GHCR", ghcr_digest),
-    ):
-        if not DIGEST_RE.fullmatch(digest):
-            raise ValueError(f"{name} digest must be a sha256 manifest digest")
-    if dockerhub_digest != ghcr_digest:
-        raise ValueError("Docker Hub and GHCR must publish the same manifest digest")
+    if not DIGEST_RE.fullmatch(ghcr_digest):
+        raise ValueError("GHCR digest must be a sha256 manifest digest")
 
     files = _unique_files(root)
     expected = expected_package_names(version)
@@ -121,13 +114,8 @@ def create_manifest(
         "build_date": build_date,
         "assets": assets,
         "images": {
-            "dockerhub": {
-                "reference": f"aethersailor/subconverter-extended:{version}",
-                "digest": dockerhub_digest,
-                "revision": revision,
-            },
             "ghcr": {
-                "reference": f"ghcr.io/aethersailor/subconverter-extended:{version}",
+                "reference": f"ghcr.io/astralwaveorg/omnisub:{version}",
                 "digest": ghcr_digest,
                 "revision": revision,
             },
@@ -152,7 +140,6 @@ def verify_manifest(*, root: Path, manifest: dict) -> None:
         version=manifest["version"],
         revision=manifest["revision"],
         build_date=manifest["build_date"],
-        dockerhub_digest=manifest["images"]["dockerhub"]["digest"],
         ghcr_digest=manifest["images"]["ghcr"]["digest"],
     )
     if recreated != manifest:
@@ -169,7 +156,6 @@ def main() -> int:
     build.add_argument("--version", required=True)
     build.add_argument("--revision", required=True)
     build.add_argument("--build-date", required=True)
-    build.add_argument("--dockerhub-digest", required=True)
     build.add_argument("--ghcr-digest", required=True)
 
     verify = subparsers.add_parser("verify")
@@ -183,7 +169,6 @@ def main() -> int:
             version=args.version,
             revision=args.revision,
             build_date=args.build_date,
-            dockerhub_digest=args.dockerhub_digest,
             ghcr_digest=args.ghcr_digest,
         )
         args.output.write_text(

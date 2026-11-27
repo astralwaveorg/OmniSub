@@ -2611,6 +2611,37 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                         singleproxy["grpc-opts"]["grpc-service-name"] >>= path;
                         edge.clear();
                         break;
+                    case "xhttp"_hash:
+                        singleproxy["xhttp-opts"]["path"] >>= path;
+                        singleproxy["xhttp-opts"]["host"] >>= host;
+                        singleproxy["xhttp-opts"]["mode"] >>= mode;
+                        if (const auto opts = singleproxy["xhttp-opts"]; opts.IsMap()) {
+                            for (const auto &entry : opts) {
+                                if (!entry.first.IsScalar()) {
+                                    node.InvalidNativeXhttpOptions = true;
+                                    break;
+                                }
+                                const std::string key = entry.first.Scalar();
+                                if (key == "path" || key == "mode" || key == "host")
+                                    continue;
+                                if (key == "reuse-settings" && entry.second.IsMap()) {
+                                    for (const auto &reuse : entry.second) {
+                                        if (!reuse.first.IsScalar() || !reuse.second.IsScalar()) {
+                                            node.InvalidNativeXhttpOptions = true;
+                                            break;
+                                        }
+                                        node.NativeXhttpOptions.emplace_back(
+                                            "reuse-settings." + reuse.first.Scalar(), reuse.second.Scalar());
+                                    }
+                                } else if (entry.second.IsScalar()) {
+                                    node.NativeXhttpOptions.emplace_back(key, entry.second.Scalar());
+                                } else {
+                                    node.InvalidNativeXhttpOptions = true;
+                                }
+                            }
+                        }
+                        edge.clear();
+                        break;
                     default:
                         continue;
                 }
@@ -2628,11 +2659,15 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                 singleproxy["client-fingerprint"] >>= fp;
                 singleproxy["alpn"] >>= alpnList;
                 singleproxy["packet-encoding"] >>= packet_encoding;
-                bool vless_udp;
-                singleproxy["udp"] >> vless_udp;
                 vlessConstruct(node, XRAY_DEFAULT_GROUP, ps, server, port, type, id, aid, net, "auto", flow, mode, path,
                                host, "", tls, pbk, sid, fp, sni, alpnList, packet_encoding, udp, tribool(), tribool(),
                                tribool(), "", v2ray_http_upgrade);
+                if (singleproxy["reality-opts"].IsMap()) {
+                    std::string mlkem;
+                    singleproxy["reality-opts"]["support-x25519mlkem768"] >>= mlkem;
+                    if (mlkem == "true" || mlkem == "false")
+                        node.RealityMlkem768 = tribool(mlkem);
+                }
                 break;
             case "hysteria"_hash:
                 group = HYSTERIA_DEFAULT_GROUP;

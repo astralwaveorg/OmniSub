@@ -263,16 +263,16 @@ ARG SHA=""
 ARG BUILD_DATE=""
 ARG DEPENDENCY_SNAPSHOT_SHA=""
 LABEL \
-  org.opencontainers.image.title="SubConverter-Extended" \
+  org.opencontainers.image.title="OmniSub" \
   org.opencontainers.image.description="A Modern Evolution of subconverter; an enhanced implementation aligned with Mihomo configuration" \
-  org.opencontainers.image.url="https://github.com/Aethersailor/SubConverter-Extended" \
-  org.opencontainers.image.source="https://github.com/Aethersailor/SubConverter-Extended" \
+  org.opencontainers.image.url="https://github.com/astralwaveorg/OmniSub" \
+  org.opencontainers.image.source="https://github.com/astralwaveorg/OmniSub" \
   org.opencontainers.image.licenses="GPL-3.0" \
   org.opencontainers.image.version="${VERSION}" \
   org.opencontainers.image.revision="${SHA}" \
   org.opencontainers.image.created="${BUILD_DATE}" \
   com.aethersailor.dependency-snapshot.sha256="${DEPENDENCY_SNAPSHOT_SHA}" \
-  maintainer="Aethersailor"
+  maintainer="astralwaveorg"
 
 ENV TZ=Asia/Shanghai
 RUN apk add --no-cache ca-certificates tzdata && \

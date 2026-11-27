@@ -1,21 +1,382 @@
-name: Formal Release
-
+name: OmniSub release
 on:
   push:
-    tags:
-      - 'v*.*.*'
-
-# Formal versions are serialized so one release finishes before the next starts.
+    branches: [release]
 concurrency:
-  group: formal-release
+  group: omnisub-release
   cancel-in-progress: false
-
 permissions:
-  contents: write
-  packages: write
-
+  contents: read
 jobs:
-  release:
-    name: Tag release
-    uses: ./.github/workflows/build-dockerhub.yml
-    secrets: inherit
+  prepare:
+    if: github.repository == 'astralwaveorg/OmniSub'
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.version.outputs.sha }}
+      version: ${{ steps.version.outputs.version }}
+      build_date: ${{ steps.version.outputs.build_date }}
+      linux_matrix: ${{ steps.matrix.outputs.matrix }}
+      is_release: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check merge and version
+        id: version
+        env:
+          PREVIOUS: ${{ github.event.before }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r sha parent source extra <<< "$(git rev-list --parents -n1 HEAD)"
+          test "$sha" = "$GITHUB_SHA"
+          test "$parent" = "$PREVIOUS"
+          test -n "$source"
+          test -z "$extra"
+          git merge-base --is-ancestor "$source" origin/dev
+          version=$(cat VERSION)
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          previous=$(git show "$parent:VERSION" 2>/dev/null || true)
+          if [[ -n "$previous" ]]; then
+            test "$version" != "$previous"
+            test "$(printf '%s\n' "$previous" "$version" | sort -V | tail -1)" = "$version"
+          fi
+          printf 'sha=%s\nversion=%s\nbuild_date=%s\n' "$sha" "$version" \
+            "$(date -u -d "$(git show -s --format=%cI HEAD)" +%FT%TZ)" >> "$GITHUB_OUTPUT"
+      - name: Resolve packaging matrix
+        id: matrix
+        run: python3 scripts/ci/build_plan.py matrix --mode release --github-output "$GITHUB_OUTPUT"
+      - name: Verify frozen dependencies
+        run: python3 scripts/ci/dependency_snapshot.py check
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: dependency-snapshot
+          path: scripts/ci/dependencies.lock.json
+          overwrite: true
+
+  build-linux:
+    name: "🐳 Docker Build (${{ matrix.arch }})"
+    runs-on: ${{ matrix.runner }}
+    needs: prepare
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.prepare.outputs.linux_matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Download dependency snapshot
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: dependency-snapshot
+          path: dependency-snapshot
+
+      - name: Activate dependency snapshot
+        id: dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp dependency-snapshot/dependencies.lock.json scripts/ci/dependencies.lock.json
+          python3 scripts/ci/dependency_snapshot.py check
+          python3 scripts/ci/dependency_snapshot.py emit \
+            --github-output "$GITHUB_OUTPUT" \
+            --github-env "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        shell: bash
+        run: |
+          docker buildx create --name sce-builder --driver docker-container --use
+          docker buildx inspect --bootstrap
+
+      - name: Prepare Docker build args
+        id: docker_args
+        shell: bash
+        env:
+          THREADS: ${{ matrix.threads }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          REFRESH_GO_DEPS: 'false'
+          REFRESH_HEADERS: 'false'
+        run: |
+          {
+            echo 'args<<EOF'
+            bash scripts/ci/docker-build-args.sh
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build candidate image once
+        id: build_image
+        shell: bash
+        env:
+          BUILD_ARGS: ${{ steps.docker_args.outputs.args }}
+        run: |
+          bash scripts/ci/build-candidate-image.sh \
+            "${{ matrix.arch }}" \
+            "${{ matrix.dockerfile }}" \
+            "${{ matrix.image_platform }}"
+
+      - name: Verify conversion against the upstream baseline
+        if: matrix.arch == 'amd64'
+        run: python3 tests/converter_smoke.py subconverter-extended:amd64-ci
+
+      - name: Export CI artifacts from the existing cache
+        shell: bash
+        env:
+          BUILD_ARGS: ${{ steps.docker_args.outputs.args }}
+        run: |
+          bash scripts/ci/export-ci-image.sh \
+            "${{ matrix.dockerfile }}" \
+            "${{ matrix.builder_tag }}" \
+            "${{ matrix.builder_platform }}"
+
+      - name: Extract builder output
+        shell: bash
+        env:
+          EXTRACT_GENERATED: ${{ matrix.extract_generated }}
+        run: bash scripts/ci/extract-builder-output.sh "${{ matrix.builder_tag }}" "${{ matrix.extract_mode }}"
+
+      - name: Package Release Artifacts (Linux ${{ matrix.arch }})
+        if: needs.prepare.outputs.is_release == 'true'
+        shell: bash
+        env:
+          SHA: ${{ needs.prepare.outputs.sha }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+        run: bash scripts/ci/build-linux-release.sh "${{ needs.prepare.outputs.version }}" "${{ matrix.arch }}" "${{ matrix.openwrt_arches }}"
+
+      - name: Upload Artifact (Linux ${{ matrix.arch }})
+        if: needs.prepare.outputs.is_release == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: linux-${{ matrix.arch }}
+          path: SubConverter-Extended-*.tar.gz
+          retention-days: 7
+          overwrite: true
+
+      - name: Upload Artifact (OpenWrt ${{ matrix.arch }})
+        if: needs.prepare.outputs.is_release == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: openwrt-${{ matrix.arch }}
+          retention-days: 7
+          overwrite: true
+          path: |
+            SubConverter-Extended-*-openwrt-*.apk
+            SubConverter-Extended-*-openwrt-*.ipk
+
+      - name: Clean release packaging files
+        if: needs.prepare.outputs.is_release == 'true'
+        shell: bash
+        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz SubConverter-Extended-*.apk SubConverter-Extended-*.ipk subconverter subconverter-update runtime-libs runtime-root libmihomo.so build/openwrt-apk
+
+      - name: Check for file changes
+        id: check_changes
+        if: matrix.extract_generated == 'true'
+        shell: bash
+        run: |
+          if [ -n "$(git status --porcelain -- scripts/ci/dependencies.lock.json bridge/go.mod bridge/go.sum bridge/libmihomo.h bridge/mihomo_capabilities.json bridge/proxy_validation_generated.go src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify frozen generated inputs outside dev
+        if: steps.check_changes.outputs.changed == 'true'
+        shell: bash
+        run: |
+          git status --short -- scripts/ci/dependencies.lock.json bridge/go.mod bridge/go.sum bridge/libmihomo.h bridge/mihomo_capabilities.json bridge/proxy_validation_generated.go src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11
+          echo "::error::Frozen dependency/generated inputs are stale. Refresh and commit them on dev before releasing."
+          exit 1
+
+      - name: Export built image archive (${{ matrix.arch }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docker-images
+          archive="subconverter-extended-${{ matrix.arch }}.tar.gz"
+          docker save "subconverter-extended:${{ matrix.arch }}-ci" | \
+            gzip -1 > "docker-images/$archive"
+          (
+            cd docker-images
+            sha256sum "$archive" > "$archive.sha256"
+          )
+
+      - name: Upload built image archive (${{ matrix.arch }})
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: docker-image-${{ matrix.arch }}
+          path: docker-images/subconverter-extended-${{ matrix.arch }}.tar.gz*
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
+
+  build-openwrt-softfloat:
+    name: OpenWrt ARM software-float packages
+    runs-on: ubuntu-latest
+    needs: prepare
+    timeout-minutes: 90
+    if: needs.prepare.outputs.is_release == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Download dependency snapshot
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: dependency-snapshot
+          path: dependency-snapshot
+
+      - name: Activate dependency snapshot
+        run: |
+          cp dependency-snapshot/dependencies.lock.json scripts/ci/dependencies.lock.json
+          python3 scripts/ci/dependency_snapshot.py emit --github-env "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        run: |
+          docker buildx create --name sce-builder --driver docker-container --use
+          docker buildx inspect --bootstrap
+
+      - name: Cross-compile the software-float variant
+        env:
+          SHA: ${{ needs.prepare.outputs.sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          THREADS: "2"
+          REFRESH_GO_DEPS: "false"
+          REFRESH_HEADERS: "false"
+        run: |
+          set -euo pipefail
+          bash scripts/ci/docker-build-args.sh > build-args.txt
+          args=()
+          while IFS= read -r arg; do
+            [ -n "$arg" ] && args+=(--build-arg "$arg")
+          done < build-args.txt
+          docker buildx build \
+            --file docker/Dockerfile.armv7-cross \
+            --platform linux/amd64 --target ci-export --load \
+            --tag subconverter-temp:armel-builder \
+            --cache-from type=gha,scope=subconverter-armel-cross \
+            --cache-to type=gha,mode=max,scope=subconverter-armel-cross \
+            --build-arg ARM_DEB_ARCH=armel \
+            --build-arg ARM_TRIPLET=arm-linux-gnueabi \
+            --build-arg ARM_GOARM=5 \
+            --build-arg 'ARM_CPU_FLAGS=-march=armv5te -mfloat-abi=soft' \
+            "${args[@]}" .
+          EXTRACT_GENERATED=false bash scripts/ci/extract-builder-output.sh \
+            subconverter-temp:armel-builder root
+
+      - name: Package OpenWrt APK and IPK files
+        env:
+          SHA: ${{ needs.prepare.outputs.sha }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          PACKAGE_PORTABLE: "false"
+        run: |
+          bash scripts/ci/build-linux-release.sh "${{ needs.prepare.outputs.version }}" armv5 \
+            arm_cortex-a7,arm_cortex-a9,arm_arm1176jzf-s_vfp,arm_arm926ej-s,arm_xscale
+
+      - name: Upload OpenWrt software-float packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: openwrt-armel
+          retention-days: 7
+          overwrite: true
+          path: |
+            SubConverter-Extended-*-openwrt-*.apk
+            SubConverter-Extended-*-openwrt-*.ipk
+
+  build-windows-amd64:
+    timeout-minutes: 90
+    name: "🪟 Windows Build (amd64)"
+    runs-on: windows-latest
+    needs: prepare
+    if: needs.prepare.outputs.is_release == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Download dependency snapshot
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: dependency-snapshot
+          path: dependency-snapshot
+
+      - name: Activate dependency snapshot
+        shell: pwsh
+        run: |
+          Copy-Item dependency-snapshot/dependencies.lock.json scripts/ci/dependencies.lock.json -Force
+          python scripts/ci/dependency_snapshot.py check
+          python scripts/ci/dependency_snapshot.py emit --github-env $env:GITHUB_ENV
+
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: bridge/go.mod
+          cache-dependency-path: bridge/go.sum
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-curl
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-yaml-cpp
+            mingw-w64-ucrt-x86_64-pcre2
+            mingw-w64-ucrt-x86_64-rapidjson
+
+      - name: Build Windows amd64
+        shell: msys2 {0}
+        run: |
+          THREADS=4 bash scripts/build-windows-amd64.sh \
+            "${{ needs.prepare.outputs.version }}" \
+            "${{ needs.prepare.outputs.sha }}" \
+            "${{ needs.prepare.outputs.build_date }}"
+
+      - name: Package Release Artifact (Windows amd64)
+        shell: pwsh
+        run: ./scripts/package-windows-portable.ps1 -Version "${{ needs.prepare.outputs.version }}" -Revision "${{ needs.prepare.outputs.sha }}" -BuildDate "${{ needs.prepare.outputs.build_date }}"
+
+      - name: Upload Artifact (Windows amd64)
+        if: needs.prepare.outputs.is_release == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-amd64
+          path: SubConverter-Extended-*.zip
+          retention-days: 7
+          overwrite: true
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [prepare, build-linux, build-openwrt-softfloat, build-windows-amd64]
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      REVISION: ${{ needs.prepare.outputs.sha }}
+      BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+      IMAGE: ghcr.io/astralwaveorg/omnisub
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          path: artifacts
+      - name: Publish verified release
+        run: bash scripts/ci/publish-omnisub.sh

@@ -178,6 +178,9 @@ struct Proxy {
   String GRPCServiceName;
   String GRPCMode;
   String ShortId;
+  tribool RealityMlkem768; // Explicit Clash/Stash Reality handshake option.
+  std::vector<std::pair<String, String>> NativeXhttpOptions;
+  bool InvalidNativeXhttpOptions = false;
   String Flow;
   String Encryption;
   bool FlowShow = false;
