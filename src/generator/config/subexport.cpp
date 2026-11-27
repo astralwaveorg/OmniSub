@@ -2950,6 +2950,51 @@ void addStashTlsFields(YAML::Node &out, const Proxy &node, tribool insecure,
     out["alpn"].push_back(node.Alpn);
 }
 
+bool addStashXhttpDetails(YAML::Node out, const Proxy &node) {
+  if (node.InvalidNativeXhttpOptions)
+    return false;
+  static const std::unordered_set<std::string> ranges = {
+      "x-padding-bytes", "sc-max-each-post-bytes", "sc-min-posts-interval-ms",
+      "session-length", "uplink-chunk-size", "reuse-settings.max-concurrency",
+      "reuse-settings.max-connections", "reuse-settings.c-max-reuse-times",
+      "reuse-settings.h-max-request-times", "reuse-settings.h-max-reusable-secs",
+      "reuse-settings.h-keep-alive-period"};
+  static const std::unordered_set<std::string> tokens = {
+      "x-padding-placement", "x-padding-method", "x-padding-key", "x-padding-header",
+      "session-placement", "session-key", "session-table", "seq-placement", "seq-key",
+      "uplink-data-placement", "uplink-data-key"};
+  std::unordered_set<std::string> seen;
+  for (const auto &[key, value] : node.NativeXhttpOptions) {
+    if (!seen.insert(key).second)
+      return false;
+    if (key == "x-padding-obfs-mode" || key == "no-grpc-header") {
+      if (value != "true" && value != "false")
+        return false;
+      out[key] = (value == "true");
+    } else if (ranges.count(key)) {
+      if (!regMatch(value, "^[0-9]{1,9}(-[0-9]{1,9})?$"))
+        return false;
+      if (startsWith(key, "reuse-settings.")) {
+        if (key == "reuse-settings.h-keep-alive-period") {
+          if (value.find('-') != std::string::npos)
+            return false;
+          out["reuse-settings"][key.substr(15)] = to_int(value);
+        } else {
+          out["reuse-settings"][key.substr(15)] = value;
+        }
+      } else {
+        out[key] = value;
+      }
+    } else if (tokens.count(key) && regMatch(value, "^[A-Za-z0-9_.-]{1,128}$")) {
+      out[key] = value;
+    } else {
+      return false;
+    }
+  }
+  return !(seen.count("reuse-settings.max-concurrency") &&
+           seen.count("reuse-settings.max-connections"));
+}
+
 bool addStashV2RayTransport(YAML::Node &out, const Proxy &node,
                            bool allow_http, bool allow_h2, bool allow_grpc,
                            bool allow_xhttp = false) {
@@ -3001,7 +3046,7 @@ bool addStashV2RayTransport(YAML::Node &out, const Proxy &node,
       out["xhttp-opts"]["path"] = node.Path;
     if (!node.Host.empty())
       out["xhttp-opts"]["host"] = node.Host;
-    return true;
+    return addStashXhttpDetails(out["xhttp-opts"], node);
   }
   return false;
 }
@@ -3378,7 +3423,8 @@ bool buildStashNode(const Proxy &node, YAML::Node &out, tribool udp,
                             tls_state == "reality";
     if (node.UserId.empty() ||
         (!node.Encryption.empty() && node.Encryption != "none") ||
-        (!node.PacketEncoding.empty() && node.PacketEncoding != "none") ||
+        (!node.PacketEncoding.empty() && node.PacketEncoding != "none" &&
+         node.PacketEncoding != "xudp" && node.PacketEncoding != "packetaddr") ||
         (!flow.empty() &&
          (!stashStringIn(flow, flows) ||
           (!network.empty() && network != "tcp") ||
@@ -3388,6 +3434,8 @@ bool buildStashNode(const Proxy &node, YAML::Node &out, tribool udp,
       return false;
     out["type"] = "vless";
     out["uuid"] = node.UserId;
+    if (node.PacketEncoding == "xudp" || node.PacketEncoding == "packetaddr")
+      out["packet-encoding"] = node.PacketEncoding;
     if (!flow.empty())
       out["flow"] = flow;
     addStashTlsFields(out, node, insecure, true);
@@ -3396,6 +3444,8 @@ bool buildStashNode(const Proxy &node, YAML::Node &out, tribool udp,
       out["reality-opts"]["public-key"] = node.PublicKey;
       if (!node.ShortId.empty())
         out["reality-opts"]["short-id"] = node.ShortId;
+      if (!node.RealityMlkem768.is_undef())
+        out["reality-opts"]["support-x25519mlkem768"] = node.RealityMlkem768.get();
     } else if (!node.ShortId.empty()) {
       return false;
     }
@@ -4505,6 +4555,105 @@ std::string proxyToStash(std::vector<Proxy> &nodes,
   return "";
 }
 
+namespace {
+
+bool appendSurge6Vless(std::string &line, const Proxy &node, tribool insecure) {
+  const auto safe = [](const std::string &value) {
+    return trim(value) == value && std::none_of(value.begin(), value.end(),
+        [](unsigned char c) { return c < 0x20 || c == 0x7f || c == ',' || c == '"'; });
+  };
+  const auto &network = node.TransferProtocol;
+  const bool tcp = network.empty() || network == "tcp";
+  const bool reality = !node.PublicKey.empty();
+  const bool tls = node.TLSSecure || node.TLSStr == "tls";
+  if (!regMatch(node.UserId,
+                "(?i)^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$") ||
+      node.Port == 0 || node.Hostname.empty() || node.Remark.empty() ||
+      node.Remark.find_first_of("=[]") != std::string::npos ||
+      (!node.Encryption.empty() && node.Encryption != "none") ||
+      (!node.PacketEncoding.empty() && node.PacketEncoding != "none") ||
+      !node.Edge.empty() || !node.UnderlyingProxy.empty() ||
+      node.V2rayHttpUpgrade.get(false) || node.RealityMlkem768.get(false) ||
+      node.InvalidNativeXhttpOptions || !node.NativeXhttpOptions.empty() ||
+      node.AlpnList.size() > 1 || (!node.AlpnList.empty() && !safe(node.AlpnList.front())) ||
+      (!node.FakeType.empty() && node.FakeType != "none") ||
+      (!node.TLSStr.empty() && node.TLSStr != "none" &&
+       node.TLSStr != "tls" && node.TLSStr != "reality") ||
+      (!reality && (node.TLSStr == "reality" || !node.ShortId.empty())) ||
+      (reality && (node.ServerName.empty() || insecure.get(false) ||
+                   !regMatch(node.PublicKey, "^[A-Za-z0-9_-]{43}$") ||
+                   !regMatch(node.ShortId, "^(?:[0-9A-Fa-f]{2}){0,8}$"))) ||
+      (!node.Flow.empty() &&
+       (node.Flow != "xtls-rprx-vision" || !tcp || (!tls && !reality))))
+    return false;
+  for (const auto *field : {&node.Remark, &node.Hostname, &node.ServerName,
+                            &node.Path, &node.Host, &node.GRPCServiceName,
+                            &node.Fingerprint})
+    if (!safe(*field))
+      return false;
+  for (const auto &[key, value] : node.XrayLinkOptions)
+    if (key != "authority" || network != "grpc" || !safe(value))
+      return false;
+
+  line = "vless, " + node.Hostname + ", " + std::to_string(node.Port) +
+         ", username=" + node.UserId;
+  if (reality) {
+    line += ", reality-public-key=" + node.PublicKey;
+    if (!node.ShortId.empty())
+      line += ", reality-short-id=" + node.ShortId;
+    if (!node.Fingerprint.empty())
+      line += ", client-fingerprint=" + node.Fingerprint;
+  } else if (tls) {
+    line += ", tls=true";
+    if (!insecure.is_undef())
+      line += ", skip-cert-verify=" + insecure.get_str();
+  }
+  if ((reality || tls) && !node.ServerName.empty())
+    line += ", sni=" + node.ServerName;
+  if ((reality || tls) && !node.AlpnList.empty())
+    line += ", alpn=" + node.AlpnList.front();
+  if (!node.Flow.empty())
+    line += ", flow=" + node.Flow;
+  if (tcp)
+    return true;
+  if (network == "ws") {
+    line += ", ws=true, ws-path=" + node.Path;
+    if (!node.Host.empty() && node.Host.find_first_of("|:") == std::string::npos)
+      line += ", ws-headers=Host:" + node.Host;
+    else if (!node.Host.empty())
+      return false;
+    return true;
+  }
+  if (network == "grpc") {
+    if (node.GRPCMode != "" && node.GRPCMode != "gun" && node.GRPCMode != "multi")
+      return false;
+    line += ", grpc=true";
+    if (!node.GRPCServiceName.empty() && node.GRPCServiceName != "/")
+      line += ", grpc-service-name=" + node.GRPCServiceName;
+    if (node.GRPCMode == "multi")
+      line += ", grpc-mode=multi";
+    const std::string authority = xrayLinkOption(node, "authority");
+    if (!authority.empty())
+      line += ", grpc-authority=" + authority;
+    return true;
+  }
+  if (network == "xhttp") {
+    if (node.GRPCMode != "" && node.GRPCMode != "auto" &&
+        node.GRPCMode != "stream-one" && node.GRPCMode != "stream-up" &&
+        node.GRPCMode != "packet-up")
+      return false;
+    line += ", xhttp=true, xhttp-path=" + node.Path;
+    if (!node.Host.empty())
+      line += ", xhttp-host=" + node.Host;
+    if (!node.GRPCMode.empty())
+      line += ", xhttp-mode=" + node.GRPCMode;
+    return true;
+  }
+  return false;
+}
+
+} // namespace
+
 std::string proxyToSurge(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,
@@ -4779,6 +4928,9 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
                  std::to_string(x.ShadowTLSVersion);
       break;
     }
+    case ProxyType::VLESS:
+      supported = surge_ver >= 6 && appendSurge6Vless(proxy, x, scv);
+      break;
     case ProxyType::Hysteria2:
       if (surge_ver < 4 || !surgeProxyScalarIsSafe(hostname) ||
           !surgeProxyScalarIsSafe(password) ||

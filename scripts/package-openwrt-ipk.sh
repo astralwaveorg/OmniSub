@@ -28,7 +28,7 @@ Priority: optional
 Maintainer: Aethersailor
 License: GPL-3.0-only
 Depends: ${depends}
-Source: https://github.com/Aethersailor/SubConverter-Extended
+Source: https://github.com/astralwaveorg/OmniSub
 Description: SubConverter-Extended portable package with LuCI
 EOF
 printf '/etc/config/%s\n' "${PACKAGE_NAME}" > "${WORK_DIR}/control/conffiles"

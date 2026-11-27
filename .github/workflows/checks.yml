@@ -1,0 +1,20 @@
+name: Checks
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev, release]
+permissions:
+  contents: read
+jobs:
+  source-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+      - run: |
+          python3 scripts/ci/dependency_snapshot.py check
+          python3 -m py_compile tests/converter_smoke.py scripts/ci/release_manifest.py
+          bash -n scripts/ci/build-linux-release.sh
+          grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+' VERSION

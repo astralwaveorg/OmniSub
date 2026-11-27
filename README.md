@@ -5,13 +5,12 @@
   <img src="design/favicon-dark-proposal.svg#gh-dark-mode-only" alt="SubConverter-Extended icon" width="96" height="96">
 </p>
 
-# SubConverter-Extended
+# OmniSub
 
 **面向多种代理客户端的订阅转换后端增强版**
 
-[![GitHub Tag](https://img.shields.io/github/v/tag/Aethersailor/SubConverter-Extended?style=flat&logo=github&label=version&color=blue)](https://github.com/Aethersailor/SubConverter-Extended/releases/latest)
-[![Release](https://img.shields.io/github/actions/workflow/status/Aethersailor/SubConverter-Extended/release.yml?style=flat&label=release&logo=githubactions)](https://github.com/Aethersailor/SubConverter-Extended/actions/workflows/release.yml)
-[![Docker Pulls](https://img.shields.io/docker/pulls/aethersailor/subconverter-extended?style=flat&logo=docker)](https://hub.docker.com/r/aethersailor/subconverter-extended)
+[![GitHub Tag](https://img.shields.io/github/v/tag/astralwaveorg/OmniSub?style=flat&logo=github&label=version&color=blue)](https://github.com/astralwaveorg/OmniSub/releases/latest)
+[![Release](https://img.shields.io/github/actions/workflow/status/astralwaveorg/OmniSub/release.yml?style=flat&label=release&logo=githubactions)](https://github.com/astralwaveorg/OmniSub/actions/workflows/release.yml)
 [![License](https://img.shields.io/badge/license-GPL--3.0-orange?style=flat)](LICENSE)
 [![Wiki](https://img.shields.io/badge/Wiki-完整用户手册-2f81f7?style=flat&logo=github)](https://github.com/Aethersailor/SubConverter-Extended/wiki)
 
@@ -28,7 +27,11 @@
 >
 > 任何组织或个人均不得利用本项目内容从事违反适用法律法规的活动。使用者须自行承担其使用行为产生的法律责任。
 
-默认分支 `dev` 用于开发和接收贡献。本文介绍当前正式版本。部署请使用[最新正式 Release](https://github.com/Aethersailor/SubConverter-Extended/releases/latest)或对应的 Docker `latest` 镜像。`master` 用于正式发布。
+OmniSub 基于 [SubConverter-Extended](https://github.com/Aethersailor/SubConverter-Extended)，保留原 Mihomo / OpenClash 转换路径。下方 Wiki 是上游参考资料；其中的发布和镜像地址属于原项目。
+
+开发在 `dev` 进行。提高 `VERSION` 并把 `dev` 合并到 `release` 后，才构建和发布 [OmniSub 正式版](https://github.com/astralwaveorg/OmniSub/releases)。Docker 部署使用 `ghcr.io/astralwaveorg/omnisub`，建议固定版本或摘要。
+
+Surge 6 的 VLESS 输出使用 `target=surge&ver=6`。Stash 使用 `target=stash`。Shadowrocket 的 `target=shadowrocket` 继续输出节点订阅。
 
 <a id="项目介绍"></a>
 

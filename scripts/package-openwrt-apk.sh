@@ -282,7 +282,7 @@ apk mkpkg \\
   --info license:GPL-3.0-only \\
   --info origin:${PACKAGE_NAME} \\
   --info maintainer:"Aethersailor" \\
-  --info url:"https://github.com/Aethersailor/SubConverter-Extended" \\
+  --info url:"https://github.com/astralwaveorg/OmniSub" \\
   --info repo-commit:${REPO_COMMIT} \\
   --info depends:"${PACKAGE_DEPENDS}" \\
   --info build-time:${BUILD_TIME} \\
