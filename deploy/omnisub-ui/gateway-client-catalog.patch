@@ -1,0 +1,225 @@
+--- a/app.py
++++ b/app.py
+@@ -19,7 +19,17 @@
+ app = Flask(__name__, static_folder=None)
+ app.config["MAX_CONTENT_LENGTH"] = 8192
+ seal = Fernet(Path("/run/secrets/link-key").read_bytes().strip())
+-targets = {"clash", "stash", "surge", "shadowrocket"}
++yaml_targets = {"clash", "clashr", "stash"}
++ini_sections = {"surge": "Proxy", "surfboard": "Proxy", "loon": "Proxy",
++                "quan": "SERVER", "quanx": "server_local", "mellow": "Endpoint"}
++uri_targets = {
++    "ss": {"ss"}, "ssr": {"ssr"}, "v2ray": {"vmess"}, "v2rayn": {"v2rayn"},
++    "v2rayng": {"v2rayn", "v2rayng"}, "trojan": {"trojan"}, "vless": {"vless"},
++    "hysteria2": {"hy2", "hysteria2"}, "mixed": None, "shadowrocket": None,
++}
++targets = yaml_targets | ini_sections.keys() | uri_targets.keys() | {"singbox", "ssd", "sssub"}
++surge_versions = ("2", "3", "4", "5", "6")
++boolean_options = {"sort", "append_type"}
+ schemes = {"ss", "ssr", "vmess", "vless", "trojan", "hy2", "hysteria2", "tuic", "hysteria", "anytls"}
+ LIMIT = 512_000
+ blocked = set(os.environ.get("DENY_IPS", "").split(","))
+@@ -70,12 +80,18 @@
+ 
+ 
+ def recipe(obj):
+-    check(isinstance(obj, dict) and set(obj) <= {"target", "sources", "list", "ver"}, "含有不支持的选项。")
++    check(isinstance(obj, dict) and set(obj) <= {"target", "sources", "list", "ver", "options"}, "含有不支持的选项。")
+     t, src = obj.get("target"), obj.get("sources")
+-    check(isinstance(t, str) and t in targets and isinstance(src, str) and 0 < len(src.encode()) <= 4200, "请选择格式，来源合计最多 4.2 KB。")
+-    check(type(obj.get("list", False)) is bool and (not obj.get("list") or t in {"clash", "stash"}), "仅 YAML 支持节点列表。")
+-    check("ver" not in obj or (t == "surge" and str(obj["ver"]) in ("5","6")), "Surge 仅支持版本 5 或 6。")
+-    return {"target": t, "sources": src.strip(), "list": bool(obj.get("list")), **({"ver":str(obj.get("ver","6"))} if t=="surge" else {})}
++    check(isinstance(t, str) and t in targets and isinstance(src, str) and 0 < len(src.encode()) <= 4200,
++          "请选择格式，来源合计最多 4.2 KB。")
++    check(type(obj.get("list", False)) is bool and (not obj.get("list") or t in yaml_targets), "仅 YAML 支持节点列表。")
++    check("ver" not in obj or (t == "surge" and str(obj["ver"]) in surge_versions), "Surge 支持版本 2 至 6。")
++    opts = obj.get("options", {})
++    check(isinstance(opts, dict) and set(opts) <= boolean_options and all(type(v) is bool for v in opts.values()),
++          "含有不支持的可选参数或参数值。")
++    return {"target": t, "sources": src.strip(), "list": obj.get("list", False),
++            **({"ver": str(obj.get("ver", "6"))} if t == "surge" else {}),
++            **({"options": opts} if opts else {})}
+ 
+ 
+ def inspect_sources(src):
+@@ -182,43 +198,98 @@
+     return out
+ 
+ 
+-def build(d):
+-    parts,total,auth=inspect_sources(d["sources"])
+-    t=d["target"]
+-    params={"target":t,"url":"|".join(parts),"config":"base/public.ini","expand":"true","insert":"false","emoji":"false","upload":"false"}
+-    if d["list"]:params["list"]="true"
+-    if t=="surge":params["ver"]=d["ver"]
+-    raw = request_engine(params)
+-    if t == "clash" and not d["list"] and any(part.startswith("data:") for part in parts):
++def count_output(t, raw):
++    """Count real nodes and extract the Hysteria2 credentials that must survive conversion."""
++    auth = []
++    if t in yaml_targets:
++        rows = yaml.safe_load(raw)["proxies"]
++        field = "auth" if t == "stash" else "password"
++        auth = [(str(n.get("server")).lower(), int(n["port"]), n.get(field))
++                for n in rows if n.get("type") == "hysteria2"]
++        return len(rows), auth
++    if t in ini_sections:
++        section = re.escape(ini_sections[t])
++        block = re.search(rf"^\[{section}\][ \t]*\r?\n(.*?)(?=^\[|\Z)", raw.decode(), re.I | re.M | re.S)
++        check(block, "OmniSub 没有生成所选客户端的代理配置。")
++        lines = [line.strip() for line in block[1].splitlines()
++                 if line.strip() and not line.lstrip().startswith(("#", ";"))]
++        if t == "mellow":
++            rows = [next(csv.reader([line], skipinitialspace=True)) for line in lines]
++            return sum(len(r) > 2 and r[1].strip().lower() != "builtin" for r in rows), auth
++        if t == "quanx":
++            # Each entry starts with the protocol to the left of "="; the
++            # first CSV value is the server address, not a protocol name.
++            return sum(bool(re.match(r"^[a-z0-9-]+\s*=\s*[^,]+,", line, re.I)) for line in lines), auth
++        rows = []
++        for line in lines:
++            _, sep, value = line.partition("=")
++            if sep:
++                fields = next(csv.reader([value.strip()], skipinitialspace=True))
++                if (len(fields) >= 2 and re.fullmatch(r"[\w-]+", fields[0], re.ASCII)
++                        and fields[0].lower() not in {"direct", "reject", "reject-tinygif"}):
++                    rows.append(fields)
++        if t in {"surge", "loon"}:
++            for row in rows:
++                if len(row) >= 4 and row[0].lower() in {"hysteria2", "hy2"}:
++                    if t == "surge":
++                        opts = dict(v.strip().split("=", 1) for v in row[3:] if "=" in v)
++                        password = opts.get("password")
++                    else:
++                        password = row[3]
++                    auth.append((row[1].strip().lower(), int(row[2]), password))
++        # Until credentials in other INI dialects can be verified, the shared
++        # equivalence check rejects Hysteria2 input rather than risking data loss.
++        return len(rows), auth
++    if t == "singbox":
++        doc = json.loads(raw)
++        rows = [r for r in doc.get("outbounds", []) if r.get("server")
++                and r.get("type") not in {"direct", "block", "dns", "selector", "urltest"}]
++        endpoints = [r for r in doc.get("endpoints", []) if r.get("type") == "wireguard"]
++        auth = [(str(r["server"]).lower(), int(r["server_port"]), r.get("password"))
++                for r in rows if r.get("type") == "hysteria2"]
++        return len(rows) + len(endpoints), auth
++    if t in {"ssd", "sssub"}:
++        if t == "ssd":
++            check(raw.startswith(b"ssd://"), "OmniSub 没有生成 SSD 订阅。")
++            doc = json.loads(b64(raw[6:].decode().strip()))
++        else:
++            doc = json.loads(raw)
++        rows = doc if t == "sssub" and isinstance(doc, list) else doc["servers"]
++        check(isinstance(rows, list) and all(isinstance(r, dict) and r.get("server") for r in rows),
++              "OmniSub 没有生成有效的 Shadowsocks 订阅。")
++        return len(rows), auth
++    links = [urlsplit(line) for line in b64(raw.decode().strip()).decode().splitlines() if line.strip()]
++    expected = uri_targets[t]
++    check(all(link.scheme and (link.netloc or link.path) and (expected is None or link.scheme in expected)
++              for link in links), "OmniSub 返回了所选格式不支持的节点链接。")
++    for p in links:
++        if p.scheme in {"hysteria2", "hy2"}:
++            auth.append((p.hostname.lower(), p.port or 443, unquote(p.netloc.rpartition("@")[0])))
++        elif t in {"v2rayn", "v2rayng"} and p.netloc == "hysteria2":
++            row = json.loads(b64(p.path.removeprefix("/")))
++            auth.append((row["Address"].lower(), int(row["Port"]), row.get("Password")))
++    return len(links), auth
++
++
++def build(d):
++    parts, total, auth = inspect_sources(d["sources"])
++    t = d["target"]
++    params = {"target": t, "url": "|".join(parts), "config": "base/public.ini",
++              "expand": "true", "insert": "false", "emoji": "false", "upload": "false",
++              **{k: str(v).lower() for k, v in d.get("options", {}).items()}}
++    if d["list"]:
++        params["list"] = "true"
++    if t == "surge":
++        params["ver"] = d["ver"]
++    raw = request_engine(params)
++    if t in {"clash", "clashr"} and not d["list"] and any(part.startswith("data:") for part in parts):
+         raw = inline_clash_subscriptions(raw, params, parts)
+-    if t in ("clash","stash"):
+-        rows=yaml.safe_load(raw).get("proxies",[])
+-        field="auth" if t=="stash" else "password"
+-        actual=[(str(n.get("server")).lower(),int(n["port"]),n.get(field)) for n in rows if n.get("type")=="hysteria2"]
+-        check(Counter(actual)==Counter(auth),"转换后的 Hysteria2 认证与来源不一致，已停止交付。")
+-        written=len(rows)
+-    elif t=="surge":
+-        raw=b"\n".join(line for line in raw.split(b"\n") if not line.startswith(b"#!MANAGED-CONFIG"))
+-        block=re.search(rb"(?ims)^\[Proxy\]\s*\n(.*?)(?=^\[|\Z)",raw)
+-        check(block,"OmniSub 没有生成 Surge 代理配置。")
+-        surge_auth=[]
+-        for line in block[1].decode().splitlines():
+-            _,sep,params=line.partition("=")
+-            if not sep:continue
+-            values=next(csv.reader([params.strip()],skipinitialspace=True))
+-            if len(values)>=4 and values[0].lower() in ("hysteria2","hy2"):
+-                options=dict(v.strip().split("=",1) for v in values[3:] if "=" in v)
+-                surge_auth.append((values[1].strip().lower(),int(values[2]),options.get("password")))
+-        check(Counter(surge_auth)==Counter(auth),"Surge 不能等价表示这组 Hysteria2 认证，已停止交付。")
+-        written=sum(bool(re.match(rb"^[^#;][^=]*=\s*(?!direct\b|reject\b)[\w-]+\s*,",l.strip(),re.I)) for l in block[1].splitlines())
+-    else:
+-        lines=b64(raw.decode().strip()).decode().splitlines()
+-        links=[urlsplit(line) for line in lines if "://" in line]
+-        sr_auth=[(p.hostname.lower(),p.port or 443,unquote(p.netloc.rpartition("@")[0])) for p in links if p.scheme in ("hysteria2","hy2")]
+-        check(Counter(sr_auth)==Counter(auth),"Shadowrocket 输出的 Hysteria2 认证与来源不一致。")
+-        written=len(links)
+-    check(written==total,"所选格式不能完整保留这组节点，已停止生成。请按协议拆分或更换格式。")
+-    return raw,written
++    if t == "surge":
++        raw = b"\n".join(line for line in raw.split(b"\n") if not line.startswith(b"#!MANAGED-CONFIG"))
++    written, actual_auth = count_output(t, raw)
++    check(Counter(actual_auth) == Counter(auth), "转换后的 Hysteria2 认证与来源不一致，已停止交付。")
++    check(written == total, "所选格式不能完整保留这组节点，已停止生成。请按协议拆分或更换格式。")
++    return raw, written
+ 
+ 
+ @app.errorhandler(Exception)
+@@ -256,14 +327,32 @@
+     c=http.client.HTTPConnection("engine",25500,timeout=2)
+     try:
+         c.request("GET","/healthz");r=c.getresponse()
+-        return ("ok\n",200) if r.status==200 and r.read(16).strip()==b"ok" else ("unavailable\n",503)
++        if not (r.status == 200 and r.read(16).strip() == b"ok"):
++            return "unavailable\n", 503
++        if request.args.get("capabilities") != "1":
++            return "ok\n", 200
++        c.request("GET", "/version", headers={"Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"})
++        r = c.getresponse()
++        version = re.fullmatch(rb"(?:OmniSub|SubConverter-Extended) (v?[\w.+-]+) backend", r.read(512).strip())
++        if r.status != 200 or version is None:
++            return jsonify(error="无法确认本站后端版本。"), 503
++        return jsonify(backend="OmniSub", version=version[1].decode(),
++                       targets=sorted((targets - {"surge"}) | {"surge&ver=" + v for v in surge_versions}),
++                       options=sorted(boolean_options | {"list"}))
+     finally:c.close()
+ 
+ 
+ @app.post("/api/links")
+ def create():
+-    d=recipe(request.get_json())
+-    raw,count=build(d)
++    payload = request.get_json()
++    check(isinstance(payload, dict), "转换参数无效。")
++    action = payload.pop("action", "convert")
++    check(action in ("convert", "diagnose"), "转换操作无效。")
++    d = recipe(payload)
++    _, count = build(d)
++    if action == "diagnose":
++        return jsonify(status="ok", count=count, target=d["target"],
++                       **({"ver": d["ver"]} if "ver" in d else {}))
+     token=seal.encrypt(json.dumps(d,ensure_ascii=False,separators=(",",":")).encode()).decode()
+     check(len(token)<6500,"更新地址过长，请改用原订阅网址。")
+     return jsonify(path="/s/"+token,count=count)
+@@ -280,5 +369,7 @@
+         check(set(q)<={"url","target","list","ver"} and all(len(q.getlist(k))==1 for k in q) and q.get("list","false") in {"true","false"}, "转换参数无效。")
+         d=recipe({"sources":q.get("url","").replace("|","\n"),"target":q.get("target"),"list":q.get("list")=="true",**({"ver":q["ver"]} if "ver" in q else {})})
+     raw,_=build(d)
+-    ext={"clash":"yaml","stash":"yaml","surge":"conf","shadowrocket":"txt"}[d["target"]]
++    t = d["target"]
++    ext = ("yaml" if t in yaml_targets else "json" if t in {"sssub", "singbox"}
++           else "conf" if t in ini_sections else "txt")
+     return Response(raw,content_type="text/plain; charset=utf-8",headers={"Content-Disposition":f'attachment; filename="omnisub-{d["target"]}.{ext}"'})
