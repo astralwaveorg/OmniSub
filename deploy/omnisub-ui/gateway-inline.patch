@@ -1,0 +1,75 @@
+--- a/app.py
++++ b/app.py
+@@ -129,12 +129,7 @@
+     return parts,count,auth
+
+
+-def build(d):
+-    parts,total,auth=inspect_sources(d["sources"])
+-    t=d["target"]
+-    params={"target":t,"url":"|".join(parts),"config":"base/public.ini","expand":"true","insert":"false","emoji":"false","upload":"false"}
+-    if d["list"]:params["list"]="true"
+-    if t=="surge":params["ver"]=d["ver"]
++def request_engine(params):
+     path="/sub?"+urlencode(params)
+     check(len(path)<750_000,"合并后的节点过大。")
+     c=http.client.HTTPConnection("engine",25500,timeout=16)
+@@ -144,6 +139,58 @@
+         raw=r.read(3_000_001)
+     finally:c.close()
+     check(0<len(raw)<=3_000_000,"转换结果为空或过大。")
++    return raw
++
++
++def inline_clash_subscriptions(raw, params, parts):
++    """Materialize the synthetic data providers for the existing public template."""
++    result = yaml.safe_load(raw)
++    providers = result.get("proxy-providers")
++    if not providers:
++        return raw
++
++    message = "站点模板无法安全展开这组 Mihomo 节点，已停止生成。"
++    data_sources = {part for part in parts if part.startswith("data:text/plain;base64,")}
++    check(isinstance(providers, dict) and all(
++        isinstance(entry, dict) and entry.get("type") == "http" and entry.get("url") in data_sources
++        for entry in providers.values()
++    ), message)
++
++    # public.ini has one select group matching every supplied node, then DIRECT.
++    # If the template changes, don't silently rewrite any more complex groups.
++    groups = result.get("proxy-groups")
++    check(isinstance(groups, list) and len(groups) == 1 and isinstance(groups[0], dict), message)
++    group = groups[0]
++    direct_names = [node["name"] for node in result.get("proxies", [])]
++    check(group.get("type") == "select" and group.get("filter") == ".*"
++          and set(group.get("use") or []) == set(providers)
++          and group.get("proxies") == direct_names + ["DIRECT"], message)
++
++    inline = yaml.safe_load(request_engine({**params, "list": "true"}))
++    rows = inline.get("proxies")
++    check(isinstance(rows, list) and all(
++        isinstance(node, dict) and isinstance(node.get("name"), str) for node in rows
++    ), message)
++    names = [node["name"] for node in rows]
++    check(len(set(names)) == len(names) and group.get("name") not in names
++          and "DIRECT" not in names, message)
++    group["proxies"] = names + ["DIRECT"]
++    del group["use"], group["filter"], result["proxy-providers"]
++    result["proxies"] = rows
++    out = yaml.safe_dump(result, allow_unicode=True, sort_keys=False).encode()
++    check(len(out) <= 3_000_000, "转换结果过大。")
++    return out
++
++
++def build(d):
++    parts,total,auth=inspect_sources(d["sources"])
++    t=d["target"]
++    params={"target":t,"url":"|".join(parts),"config":"base/public.ini","expand":"true","insert":"false","emoji":"false","upload":"false"}
++    if d["list"]:params["list"]="true"
++    if t=="surge":params["ver"]=d["ver"]
++    raw = request_engine(params)
++    if t == "clash" and not d["list"] and any(part.startswith("data:") for part in parts):
++        raw = inline_clash_subscriptions(raw, params, parts)
+     if t in ("clash","stash"):
+         rows=yaml.safe_load(raw).get("proxies",[])
+         field="auth" if t=="stash" else "password"

@@ -1,0 +1,3 @@
+[submodule "OmniSubUI"]
+	path = OmniSubUI
+	url = git@github.com:astralwaveorg/OmniSubUI.git
